@@ -8,15 +8,102 @@ class Disconnect(Exception): pass
 # A simple structure to represent Redis errors
 Error = namedtuple('Error', ('message',))
 
+#Wire Protocol
 class ProtocolHandler:
-    def handle_request(self, reader):
-        #Logic to read and parse the Redis command
-        pass
+    def __init__(self):
+        # We must use byte prefixes (b'+') because asyncio readers return bytes
+        self.handlers = {
+            b'+': self.handle_simple_string,
+            b'-': self.handle_error,
+            b':': self.handle_integer,
+            b'$': self.handle_string,
+            b'*': self.handle_array,
+            b'%': self.handle_dict
+        }
 
-    def write_response(self, writer, data):
-        #Logic to write the response back to the client
-        pass
+    async def handle_request(self, reader):
+        first_byte = await reader.read(1)
+        if not first_byte:
+            raise Disconnect()
 
+        try:
+            # Await the delegated handler
+            return await self.handlers[first_byte](reader)
+        except KeyError:
+            raise CommandError('bad request')
+
+    async def handle_simple_string(self, reader):
+        line = await reader.readline()
+        return line.rstrip(b'\r\n').decode('utf-8')
+
+    async def handle_error(self, reader):
+        line = await reader.readline()
+        return Error(line.rstrip(b'\r\n').decode('utf-8'))
+
+    async def handle_integer(self, reader):
+        line = await reader.readline()
+        return int(line.rstrip(b'\r\n'))
+
+    async def handle_string(self, reader):
+        line = await reader.readline()
+        length = int(line.rstrip(b'\r\n'))
+        if length == -1:
+            return None  # Special-case for NULLs.
+        length += 2  # Include the trailing \r\n in count.
+        data = await reader.read(length)
+        return data[:-2] # Returning as bytes, which is standard for Redis values
+
+    async def handle_array(self, reader):
+        line = await reader.readline()
+        num_elements = int(line.rstrip(b'\r\n'))
+        # Async list comprehension to read all elements
+        return [await self.handle_request(reader) for _ in range(num_elements)]
+
+    async def handle_dict(self, reader):
+        line = await reader.readline()
+        num_items = int(line.rstrip(b'\r\n'))
+        elements = [await self.handle_request(reader) for _ in range(num_items * 2)]
+        return dict(zip(elements[::2], elements[1::2]))
+
+    # --- SERIALIZATION ---
+
+    async def write_response(self, writer, data):
+        buf = BytesIO()
+        self._write(buf, data)
+        buf.seek(0)
+        writer.write(buf.getvalue())
+        # Drain ensures the data is actually sent over the network
+        await writer.drain()
+
+    def _write(self, buf, data):
+        if isinstance(data, str):
+            data = data.encode('utf-8')
+
+        if isinstance(data, bytes):
+            buf.write(f"${len(data)}\r\n".encode('utf-8'))
+            buf.write(data)
+            buf.write(b"\r\n")
+        elif isinstance(data, int):
+            buf.write(f":{data}\r\n".encode('utf-8'))
+        elif isinstance(data, Error):
+            # Fixed from tutorial: changed error.message to data.message
+            buf.write(f"-{data.message}\r\n".encode('utf-8'))
+        elif isinstance(data, (list, tuple)):
+            buf.write(f"*{len(data)}\r\n".encode('utf-8'))
+            for item in data:
+                self._write(buf, item)
+        elif isinstance(data, dict):
+            buf.write(f"%{len(data)}\r\n".encode('utf-8'))
+            for key in data:
+                self._write(buf, key)
+                self._write(buf, data[key])
+        elif data is None:
+            buf.write(b"$-1\r\n")
+        else:
+            raise CommandError(f"unrecognized type: {type(data)}")
+
+
+# Skeleton
 class Server:
     def __init__(self, host='127.0.0.1', port=31337, max_clients=64):
         self.host = host
