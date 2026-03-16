@@ -5,23 +5,17 @@ from io import BytesIO
 class CommandError(Exception): pass
 class Disconnect(Exception): pass
 
-# A simple structure to represent Redis errors
+# Represent Redis errors
 Error = namedtuple('Error', ('message',))
 
 #Wire Protocol
 class ProtocolHandler:
-    def __init__(self, host='127.0.0.1', port=31337, max_clients=64):
+    def __init__(self):
         # We must use byte prefixes (b'+') because asyncio readers return bytes
-        self.host = host
-        self.port = port
-        self._limiter = asyncio.Semaphore(max_clients)
-        self._protocol = ProtocolHandler()
-        self.kv = {}
-        self.commands = self.get_commands() 
         self.handlers = {
             b'+': self.handle_simple_string,
             b'-': self.handle_error,
-            b':': self.handle_integer,
+            b':': self.handle_integer, 
             b'$': self.handle_string,
             b'*': self.handle_array,
             b'%': self.handle_dict
@@ -118,6 +112,33 @@ class Server:
         self._protocol = ProtocolHandler()
         self.kv = {}
 
+    def get_response(self, data):
+        if not data or not isinstance(data, list):
+            raise CommandError('Invalid command')
+        #Decode to strings 
+        parts = [part.decode('utf-8') if isinstance(part, bytes) else part for part in data]
+        command = parts[0].upper()
+        args = parts[1:]
+
+        if command == 'GET':
+            return self.kv.get(args[0])
+        elif command == 'SET':
+            self.kv[args[0]] = args[1]
+            return 1
+        elif command == 'DEL':
+            return 1 if self.kv.pop(args[0], None) is not None else 0 
+        elif command == 'FLUSH':
+            self.kv.clear()
+            return 'OK'
+        elif command == 'MGET':
+            return [self.kv.get(key) for key in args]
+        elif command == 'MSET':
+            for i in range(0, len(args), 2):
+                self.kv[args[i]] = args[i+1]
+            return 1
+        else:
+            raise CommandError(f'Unknown command: {command}')
+
     async def connection_handler(self, reader, writer):
         async with self._limiter:
             address = writer.get_extra_info('peername')
@@ -138,10 +159,6 @@ class Server:
                 writer.close()
                 await writer.wait_closed()
 
-    def get_response(self, data):
-        #Redis commands
-        pass
-
     async def run(self):
         server = await asyncio.start_server(
             self.connection_handler, self.host, self.port)
@@ -154,15 +171,16 @@ class Server:
 
 #Client
 class Client:
-    def __init__(self, host='127.0.1', port=31337):
-        self.host = host
-        self.port = port
+    def __init__(self, host='127.0.0.1', port=31337):
+        self._host = host
+        self._port = port
         self._protocol = ProtocolHandler()
         self._reader = None
         self._writer = None
 
     async def connect(self):
         self._reader, self._writer = await asyncio.open_connection(self._host, self._port)
+
     async def execute(self, *args):
         if not self._writer:
             await self.connect()
@@ -175,16 +193,22 @@ class Client:
     
     async def get(self, key):
         return await self.execute('GET', key)
+    
     async def set(self, key, value):
         return await self.execute('SET', key, value)
+    
     async def delete (self, key):
         return await self.execute('DEL', key)
+    
     async def flush(self):
         return await self.execute('FLUSH')
+    
     async def mget(self, *keys):
         return await self.execute('MGET', *keys)
+    
     async def mset(self, *items):
         return await self.execute('MSET', *items)
+    
     async def close(self):
         if self._writer:
             self._writer.close()
