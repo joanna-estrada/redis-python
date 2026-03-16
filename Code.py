@@ -10,8 +10,14 @@ Error = namedtuple('Error', ('message',))
 
 #Wire Protocol
 class ProtocolHandler:
-    def __init__(self):
+    def __init__(self, host='127.0.0.1', port=31337, max_clients=64):
         # We must use byte prefixes (b'+') because asyncio readers return bytes
+        self.host = host
+        self.port = port
+        self._limiter = asyncio.Semaphore(max_clients)
+        self._protocol = ProtocolHandler()
+        self.kv = {}
+        self.commands = self.get_commands() 
         self.handlers = {
             b'+': self.handle_simple_string,
             b'-': self.handle_error,
@@ -144,7 +150,47 @@ class Server:
             print(f"Server started on {self.host}:{self.port}")
             await server.serve_forever()
 
-if __name__ == "__main__":
+
+
+#Client
+class Client:
+    def __init__(self, host='127.0.1', port=31337):
+        self.host = host
+        self.port = port
+        self._protocol = ProtocolHandler()
+        self._reader = None
+        self._writer = None
+
+    async def connect(self):
+        self._reader, self._writer = await asyncio.open_connection(self._host, self._port)
+    async def execute(self, *args):
+        if not self._writer:
+            await self.connect()
+
+        await self._protocol.write_response(self._writer, args)
+        resp = await self._protocol.handle_request(self._reader)
+        if isinstance(resp, Error):
+            raise CommandError(resp.message)
+        return resp
+    
+    async def get(self, key):
+        return await self.execute('GET', key)
+    async def set(self, key, value):
+        return await self.execute('SET', key, value)
+    async def delete (self, key):
+        return await self.execute('DEL', key)
+    async def flush(self):
+        return await self.execute('FLUSH')
+    async def mget(self, *keys):
+        return await self.execute('MGET', *keys)
+    async def mset(self, *items):
+        return await self.execute('MSET', *items)
+    async def close(self):
+        if self._writer:
+            self._writer.close()
+            await self._writer.wait_closed()        
+
+if __name__ == '__main__':
     server = Server()
     try:
         asyncio.run(server.run())
