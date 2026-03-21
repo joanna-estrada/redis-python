@@ -116,9 +116,8 @@ class Server:
         if not data or not isinstance(data, list):
             raise CommandError('Invalid command')
         #Decode to strings 
-        parts = [part.decode('utf-8') if isinstance(part, bytes) else part for part in data]
-        command = parts[0].upper()
-        args = parts[1:]
+        command = data[0].decode('utf-8').upper()
+        args = data[1:]
 
         if command == 'GET':
             return self.kv.get(args[0])
@@ -133,6 +132,8 @@ class Server:
         elif command == 'MGET':
             return [self.kv.get(key) for key in args]
         elif command == 'MSET':
+            if len(args) % 2 != 0:
+                raise CommandError('MSET requires an even number of arguments')
             for i in range(0, len(args), 2):
                 self.kv[args[i]] = args[i+1]
             return 1
@@ -154,6 +155,8 @@ class Server:
                         resp = self.get_response(data)
                     except CommandError as exc:
                         resp = Error(exc.args[0])
+                    except Exception as exc:
+                        resp = Error(f"Internal error: {str(exc)}")
                     await self._protocol.write_response(writer, resp)
             finally:
                 writer.close()

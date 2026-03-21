@@ -325,13 +325,12 @@ class TestErrorHandling:
         assert await client.get("k") == b""
 
     async def test_mset_odd_args_is_handled(self, client):
-        """MSET with odd number of args — server should either error or ignore last."""
-        try:
-            await client.mset("k1", "v1", "orphan_key")
-        except (CommandError, IndexError):
-            pass  # Either behaviour is acceptable; just must not crash the server.
-        # Server should still be alive
-        assert await client.get("k1") == b"v1"
+        """MSET with odd number of args — server should either error or not save anything."""
+        await client.set("existing", "value")
+        with pytest.raises(CommandError):
+            await client.mset("k1", "v1", "k2")  # Missing value for k2
+        assert await client.get("existing") == b"value"  # Existing data should be unaffected
+        assert await client.get("k1") is None  # k1 should not be set
 
 
 # ---------------------------------------------------------------------------
